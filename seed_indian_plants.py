@@ -1,16 +1,30 @@
 """
-Seed irrigation.db with Indian plant profiles.
-Fetches Indian plant names from Trefle API, maps families to realistic
-cultivation parameters, and inserts into plant_profiles table.
+Seed Indian plant profiles into any database (SQLite or PostgreSQL).
+Usage:
+  Local SQLite:  python seed_indian_plants.py
+  Remote PG:     set DATABASE_URL=postgresql+asyncpg://... && python seed_indian_plants.py
 """
 
-import sqlite3
-import requests
-import json
-from datetime import datetime
+import os
+import httpx
+from datetime import datetime, timezone
 
 TOKEN = "usr-hAyIXimDNFJ_IK2sNGuIo37ELm5odMaeQLvR68KVHlU"
-DB_PATH = "irrigation.db"
+
+DB_URL = os.environ.get("DATABASE_URL", "sqlite:///./irrigation.db")
+
+# Normalize for sync SQLAlchemy (use psycopg2 driver)
+if DB_URL.startswith("postgresql+asyncpg"):
+    DB_URL = DB_URL.replace("postgresql+asyncpg", "postgresql+psycopg2", 1)
+
+from sqlalchemy import (
+    create_engine,
+    text,
+)
+from sqlalchemy.orm import sessionmaker
+
+engine = create_engine(DB_URL, echo=False)
+Session = sessionmaker(bind=engine)
 
 # ── Family/type → cultivation parameter mapping ──────────────────────────
 # Ranges based on Indian horticultural / agronomic data
@@ -504,7 +518,7 @@ def fetch_trefle_plants(query="india", max_pages=3):
     for page in range(1, max_pages + 1):
         url = f"https://trefle.io/api/v1/plants?token={TOKEN}&filter[distribution]=india&per_page=30&page={page}"
         try:
-            resp = requests.get(url, timeout=15)
+            resp = httpx.get(url, timeout=15)
             data = resp.json().get("data", [])
             if not data:
                 break
@@ -557,60 +571,129 @@ def build_plant_list():
 
 # ── Insert into DB ──────────────────────────────────────────────────────
 def seed_database(plants):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    inserted = 0
-    skipped = 0
-
-    for p in plants:
-        sci = p["scientific_name"]
-        common = p["common_name"]
-        family = p.get("family", "")
-
-        profile = FAMILY_PROFILES.get(family, FAMILY_PROFILES["default"])
-
-        name = common if common else sci
-        description = profile["description"]
-        if family:
-            description += f" Family: {family}."
-        description += f" Scientific name: {sci}."
-
-        try:
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO plant_profiles
-                (name, category, moisture_min, moisture_max, ideal_moisture,
-                 temp_min, temp_max, humidity_min, humidity_max,
-                 avg_moisture_decay_per_hour, description, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                (
-                    name,
-                    profile["category"],
-                    profile["moisture_min"],
-                    profile["moisture_max"],
-                    profile["ideal_moisture"],
-                    profile["temp_min"],
-                    profile["temp_max"],
-                    profile["humidity_min"],
-                    profile["humidity_max"],
-                    profile["avg_moisture_decay_per_hour"],
-                    description,
-                    datetime.utcnow().isoformat(),
-                ),
+    print(f"Seeding database: {DB_URL}")
+    with engine.connect() as conn:
+        # Ensure table exists
+        conn.execute(
+            text("""
+            CREATE TABLE IF NOT EXISTS plant_profiles (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL UNIQUE,
+                category VARCHAR(50) NOT NULL,
+                moisture_min FLOAT NOT NULL,
+                moisture_max FLOAT NOT NULL,
+                ideal_moisture FLOAT NOT NULL,
+                temp_min FLOAT NOT NULL,
+                temp_max FLOAT NOT NULL,
+                humidity_min FLOAT NOT NULL,
+                humidity_max FLOAT NOT NULL,
+                avg_moisture_decay_per_hour FLOAT NOT NULL,
+                description TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
             )
-            if cur.rowcount > 0:
-                inserted += 1
-            else:
-                skipped += 1
-        except Exception as e:
-            print(f"  Error inserting {sci}: {e}")
-            skipped += 1
+        """)
+        )
+        conn.commit()
 
-    conn.commit()
-    conn.close()
-    print(f"\nDone! Inserted: {inserted}, Skipped (duplicate): {skipped}")
+        inserted = 0
+        skipped = 0
+
+        for p in plants:
+            sci = p["scientific_name"]
+            common = p["common_name"]
+            family = p.get("family", "")
+
+            profile = FAMILY_PROFILES.get(family, FAMILY_PROFILES["default"])
+
+            name = common if common else sci
+            description = profile["description"]
+            if family:
+                description += f" Family: {family}."
+            description += f" Scientific name: {sci}."
+
+            try:
+                conn.execute(
+                    text("""
+                    INSERT INTO plant_profiles
+                    (name, category, moisture_min, moisture_max, ideal_moisture,
+                     temp_min, temp_max, humidity_min, humidity_max,
+                     avg_moisture_decay_per_hour, description, created_at)
+                    VALUES (:name, :category, :moisture_min, :moisture_max, :ideal_moisture,
+                            :temp_min, :temp_max, :humidity_min, :humidity_max,
+                            :decay, :description, :created_at)
+                    ON CONFLICT (name) DO NOTHING
+                """),
+                    {
+                        "name": name,
+                        "category": profile["category"],
+                        "moisture_min": profile["moisture_min"],
+                        "moisture_max": profile["moisture_max"],
+                        "ideal_moisture": profile["ideal_moisture"],
+                        "temp_min": profile["temp_min"],
+                        "temp_max": profile["temp_max"],
+                        "humidity_min": profile["humidity_min"],
+                        "humidity_max": profile["humidity_max"],
+                        "decay": profile["avg_moisture_decay_per_hour"],
+                        "description": description,
+                        "created_at": datetime.now(timezone.utc),
+                    },
+                )
+                inserted += 1
+            except Exception as e:
+                print(f"  Error inserting {sci}: {e}")
+                skipped += 1
+
+        conn.commit()
+        print(f"\nDone! Inserted: {inserted}, Skipped (duplicate): {skipped}")
+
+
+async def seed_database_sync():
+    """Async version that uses the app's async database engine."""
+    from app.database import AsyncSessionLocal
+    from app.models import PlantProfile
+
+    plants = build_plant_list()
+
+    async with AsyncSessionLocal() as db:
+        inserted = 0
+        skipped = 0
+
+        for p in plants:
+            sci = p["scientific_name"]
+            common = p["common_name"]
+            family = p.get("family", "")
+
+            profile = FAMILY_PROFILES.get(family, FAMILY_PROFILES["default"])
+
+            name = common if common else sci
+            description = profile["description"]
+            if family:
+                description += f" Family: {family}."
+            description += f" Scientific name: {sci}."
+
+            try:
+                plant = PlantProfile(
+                    name=name,
+                    category=profile["category"],
+                    moisture_min=profile["moisture_min"],
+                    moisture_max=profile["moisture_max"],
+                    ideal_moisture=profile["ideal_moisture"],
+                    temp_min=profile["temp_min"],
+                    temp_max=profile["temp_max"],
+                    humidity_min=profile["humidity_min"],
+                    humidity_max=profile["humidity_max"],
+                    avg_moisture_decay_per_hour=profile["avg_moisture_decay_per_hour"],
+                    description=description,
+                )
+                db.add(plant)
+                await db.commit()
+                inserted += 1
+            except Exception as e:
+                await db.rollback()
+                print(f"  Error inserting {sci}: {e}")
+                skipped += 1
+
+        print(f"\nAsync seeding done! Inserted: {inserted}, Skipped: {skipped}")
 
 
 if __name__ == "__main__":

@@ -12,3 +12,4 @@ httpx
 aiosqlite
 asyncpg
 greenlet
+psycopg2-binary

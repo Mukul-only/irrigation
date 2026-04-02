@@ -1,6 +1,7 @@
 """
 FastAPI application entry point.
 """
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,8 +15,24 @@ from app.config import settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run DB migrations on startup."""
+    """Run DB migrations on startup, then seed plants if needed."""
     await init_db()
+
+    # Seed Indian plants if database is empty
+    from app.database import AsyncSessionLocal
+    from sqlalchemy import select, func
+    from app.models import PlantProfile
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(func.count(PlantProfile.id)))
+        count = result.scalar()
+        if count == 0:
+            print("Plant table empty - seeding Indian plants...")
+            from seed_indian_plants import seed_database_sync
+
+            await seed_database_sync()
+            print("Seeding complete!")
+
     yield
 
 
