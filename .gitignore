@@ -1,0 +1,9 @@
+[DIR] venv/
+[DIR] .ruff_cache/
+[DIR] __pycache__/
+[DIR] app/__pycache__/
+[DIR] app/ai/__pycache__/
+*.pyc
+.env
+irrigation.db
+*.db

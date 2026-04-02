@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+pydantic
+pydantic-settings
+numpy
+scikit-learn
+pandas
+python-dotenv
+httpx
+aiosqlite
+asyncpg
+greenlet
