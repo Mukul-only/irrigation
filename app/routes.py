@@ -1,6 +1,7 @@
 """
 API Routes — /api/v1/irrigate  and plant CRUD + history endpoints.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -12,13 +13,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import (
-    AnomalyEvent, IrrigationDecision, MoisturePrediction,
-    PlantProfile, SensorReading,
+    AnomalyEvent,
+    IrrigationDecision,
+    MoisturePrediction,
+    PlantProfile,
+    SensorReading,
 )
 from app.schemas import (
-    IrrigationRequest, IrrigationResponse,
-    PlantProfileCreate, PlantProfileOut,
-    ReadingOut, TrendOut,
+    IrrigationRequest,
+    IrrigationResponse,
+    PlantProfileCreate,
+    PlantProfileOut,
+    ReadingOut,
+    TrendOut,
 )
 from app.ai.classification import get_classification
 from app.ai.prediction import predict_moisture
@@ -32,7 +39,12 @@ router = APIRouter(prefix="/api/v1", tags=["Irrigation AI"])
 # POST /irrigate — main pipeline endpoint
 # ===========================================================================
 
-@router.post("/irrigate", response_model=IrrigationResponse, summary="Process sensor data through AI pipeline")
+
+@router.post(
+    "/irrigate",
+    response_model=IrrigationResponse,
+    summary="Process sensor data through AI pipeline",
+)
 async def irrigate(payload: IrrigationRequest, db: AsyncSession = Depends(get_db)):
     """
     Full AI pipeline:
@@ -47,9 +59,12 @@ async def irrigate(payload: IrrigationRequest, db: AsyncSession = Depends(get_db
     w = payload.weather
     ctx = payload.context
 
+    # Treat plant_id=0 as null (no plant selected)
+    plant_id = payload.plant_id if payload.plant_id else None
+
     # ── 1. Persist raw sensor reading ───────────────────────────────────
     reading = SensorReading(
-        plant_id=payload.plant_id,
+        plant_id=plant_id,
         moisture_percent=s.moisture_percent,
         soil_status=s.soil_status,
         rain_percent=s.rain_percent,
@@ -71,18 +86,21 @@ async def irrigate(payload: IrrigationRequest, db: AsyncSession = Depends(get_db
         recorded_at=datetime.now(timezone.utc),
     )
     db.add(reading)
-    await db.flush()   # get reading.id without committing
+    await db.flush()  # get reading.id without committing
 
     # ── 2. Classify plant ───────────────────────────────────────────────
     classification, decay_rate = await get_classification(
-        db, payload.plant_id,
-        s.moisture_percent, s.temp_celsius, s.humidity_percent,
+        db,
+        plant_id,
+        s.moisture_percent,
+        s.temp_celsius,
+        s.humidity_percent,
     )
 
     # ── 3. Predict moisture ─────────────────────────────────────────────
     prediction = await predict_moisture(
         db,
-        plant_id=payload.plant_id,
+        plant_id=plant_id,
         current_reading_id=reading.id,
         current_moisture=s.moisture_percent,
         decay_per_hour=decay_rate,
@@ -92,8 +110,13 @@ async def irrigate(payload: IrrigationRequest, db: AsyncSession = Depends(get_db
 
     # ── 4. Detect anomalies ─────────────────────────────────────────────
     anomalies = await detect_anomalies(
-        db, s, w, ctx, classification, prediction,
-        plant_id=payload.plant_id,
+        db,
+        s,
+        w,
+        ctx,
+        classification,
+        prediction,
+        plant_id=plant_id,
         current_reading_id=reading.id,
     )
 
@@ -102,7 +125,7 @@ async def irrigate(payload: IrrigationRequest, db: AsyncSession = Depends(get_db
 
     # ── 6. Persist AI outputs ────────────────────────────────────────────
     mp = MoisturePrediction(
-        plant_id=payload.plant_id,
+        plant_id=plant_id,
         reading_id=reading.id,
         predicted_moisture_1h=prediction.predicted_moisture_1h,
         predicted_moisture_3h=prediction.predicted_moisture_3h,
@@ -114,21 +137,25 @@ async def irrigate(payload: IrrigationRequest, db: AsyncSession = Depends(get_db
     db.add(mp)
 
     for a in anomalies:
-        db.add(AnomalyEvent(
-            plant_id=payload.plant_id,
-            reading_id=reading.id,
-            anomaly_type=a.anomaly_type,
-            severity=a.severity,
-            description=a.description,
-        ))
+        db.add(
+            AnomalyEvent(
+                plant_id=plant_id,
+                reading_id=reading.id,
+                anomaly_type=a.anomaly_type,
+                severity=a.severity,
+                description=a.description,
+            )
+        )
 
-    db.add(IrrigationDecision(
-        reading_id=reading.id,
-        plant_id=payload.plant_id,
-        pump_command=decision.pump_command,
-        reason=decision.reason,
-        duration_seconds=decision.duration_seconds,
-    ))
+    db.add(
+        IrrigationDecision(
+            reading_id=reading.id,
+            plant_id=plant_id,
+            pump_command=decision.pump_command,
+            reason=decision.reason,
+            duration_seconds=decision.duration_seconds,
+        )
+    )
 
     await db.commit()
 
@@ -147,7 +174,13 @@ async def irrigate(payload: IrrigationRequest, db: AsyncSession = Depends(get_db
 # Plant profiles CRUD
 # ===========================================================================
 
-@router.post("/plants", response_model=PlantProfileOut, status_code=201, summary="Create plant profile")
+
+@router.post(
+    "/plants",
+    response_model=PlantProfileOut,
+    status_code=201,
+    summary="Create plant profile",
+)
 async def create_plant(data: PlantProfileCreate, db: AsyncSession = Depends(get_db)):
     plant = PlantProfile(**data.model_dump())
     db.add(plant)
@@ -156,13 +189,19 @@ async def create_plant(data: PlantProfileCreate, db: AsyncSession = Depends(get_
     return plant
 
 
-@router.get("/plants", response_model=list[PlantProfileOut], summary="List all plant profiles")
+@router.get(
+    "/plants", response_model=list[PlantProfileOut], summary="List all plant profiles"
+)
 async def list_plants(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(PlantProfile).order_by(PlantProfile.name))
     return result.scalars().all()
 
 
-@router.get("/plants/{plant_id}", response_model=PlantProfileOut, summary="Get a plant profile by ID")
+@router.get(
+    "/plants/{plant_id}",
+    response_model=PlantProfileOut,
+    summary="Get a plant profile by ID",
+)
 async def get_plant(plant_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(PlantProfile).where(PlantProfile.id == plant_id))
     plant = result.scalar_one_or_none()
@@ -185,7 +224,12 @@ async def delete_plant(plant_id: int, db: AsyncSession = Depends(get_db)):
 # Historical data & trends
 # ===========================================================================
 
-@router.get("/history", response_model=TrendOut, summary="Get sensor reading history and trend stats")
+
+@router.get(
+    "/history",
+    response_model=TrendOut,
+    summary="Get sensor reading history and trend stats",
+)
 async def get_history(
     plant_id: Optional[int] = Query(None, description="Filter by plant ID"),
     limit: int = Query(50, ge=1, le=500),
@@ -199,8 +243,14 @@ async def get_history(
     readings_db = result.scalars().all()
 
     if not readings_db:
-        return TrendOut(readings=[], avg_moisture=0, min_moisture=0, max_moisture=0,
-                        total_anomalies=0, pump_on_count=0)
+        return TrendOut(
+            readings=[],
+            avg_moisture=0,
+            min_moisture=0,
+            max_moisture=0,
+            total_anomalies=0,
+            pump_on_count=0,
+        )
 
     moistures = [r.moisture_percent for r in readings_db]
 
@@ -211,7 +261,9 @@ async def get_history(
     anomaly_count = (await db.execute(anomaly_q)).scalar_one()
 
     # Pump-ON count
-    pump_q = select(func.count(IrrigationDecision.id)).where(IrrigationDecision.pump_command == "ON")
+    pump_q = select(func.count(IrrigationDecision.id)).where(
+        IrrigationDecision.pump_command == "ON"
+    )
     if plant_id:
         pump_q = pump_q.where(IrrigationDecision.plant_id == plant_id)
     pump_on_count = (await db.execute(pump_q)).scalar_one()
@@ -287,7 +339,11 @@ async def get_predictions(
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
-    query = select(MoisturePrediction).order_by(desc(MoisturePrediction.created_at)).limit(limit)
+    query = (
+        select(MoisturePrediction)
+        .order_by(desc(MoisturePrediction.created_at))
+        .limit(limit)
+    )
     if plant_id:
         query = query.where(MoisturePrediction.plant_id == plant_id)
     result = await db.execute(query)
